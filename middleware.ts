@@ -1,12 +1,11 @@
-// middleware.ts
+// middleware.ts (place in root or src folder)
 import NextAuth from "next-auth";
 import authConfig from "@/auth.config";
 import {
   DEFAULT_LOGIN_REDIRECT,
-  apiAuthPrefix,
-  authRoutes,
-  privateRoutes,
-  publicRoutes, // Make sure this is defined
+  apiAuthPrefix,     // e.g., "/api/auth"
+  authRoutes,        // e.g., ["/login", "/register"]
+  privateRoutes,     // e.g., ["/my", "/orders", "/checkout/address", "/admin"]
 } from "@/routes";
 
 const { auth } = NextAuth(authConfig);
@@ -15,48 +14,45 @@ export default auth((req) => {
   const { nextUrl } = req;
   const isLoggedIn = !!req.auth;
 
-  const isApiAuthRoute = nextUrl.pathname.startsWith(apiAuthPrefix);
-  const isAuthRoute = authRoutes.includes(nextUrl.pathname);
-  const isPrivateRoute = privateRoutes.some((route) =>
-    nextUrl.pathname.startsWith(route)
-  );
-  const isPublicRoute =
-    publicRoutes.includes(nextUrl.pathname) ||
-    publicRoutes.some((route) => nextUrl.pathname.startsWith(route));
+  const pathname = nextUrl.pathname;
 
-  // Allow API auth routes and public routes
-  if (isApiAuthRoute || isPublicRoute) {
-    return null;
+  const isApiAuthRoute = pathname.startsWith(apiAuthPrefix);
+  const isAuthRoute = authRoutes.includes(pathname);
+  const isPrivateRoute = privateRoutes.some((route) => pathname.startsWith(route));
+
+  // Skip middleware logic entirely for these (just proceed)
+  if (isApiAuthRoute) return null;
+
+  // If on an auth page (login/register) and already logged in → redirect to home/dashboard
+  if (isAuthRoute && isLoggedIn) {
+    return Response.redirect(new URL(DEFAULT_LOGIN_REDIRECT, nextUrl));
   }
 
-  // Handle auth routes
-  if (isAuthRoute) {
-    if (isLoggedIn) {
-      return Response.redirect(new URL(DEFAULT_LOGIN_REDIRECT, nextUrl));
-    }
-    return null;
+  // If accessing a private route without being logged in → redirect to login
+  if (isPrivateRoute && !isLoggedIn) {
+    let callbackUrl = pathname + nextUrl.search;
+    const loginUrl = new URL("/login", nextUrl);
+    loginUrl.searchParams.set("callbackUrl", callbackUrl);
+    return Response.redirect(loginUrl);
   }
 
-  // Redirect unauthenticated users from private routes
-  if (!isLoggedIn && isPrivateRoute) {
-    let callbackUrl = nextUrl.pathname;
-    if (nextUrl.search) {
-      callbackUrl += nextUrl.search;
-    }
-
-    const redirectUrl = new URL("/login", nextUrl);
-    redirectUrl.searchParams.set("callbackUrl", callbackUrl);
-
-    return Response.redirect(redirectUrl);
-  }
-
+  // For all other routes (public pages, static assets, etc.) → proceed without auth check
   return null;
 });
 
-// Update matcher configuration
+// Crucial: Restrict middleware to ONLY routes that need it
 export const config = {
   matcher: [
-    // Exclude static files and Next.js internals
-    "/((?!_next/static|_next/image|favicon.ico|api/auth).*)",
+    // Private/protected routes
+    "/my/:path*",
+    "/orders/:path*",
+    "/checkout/address/:path*",
+    "/admin/:path*",
+
+    // Auth routes (login, register, etc.) – optional, but useful for redirecting logged-in users
+    ...authRoutes.map((route) => `${route}`),
+
+    // API auth routes if you want middleware to run there (usually not needed)
+    // "/api/auth/:path*",
   ],
 };

@@ -84,6 +84,36 @@ const productBaseInclude: Prisma.ProductInclude = {
   },
 };
 
+const productListInclude: Prisma.ProductInclude = {
+  variants: {
+    orderBy: { createdAt: "asc" },
+    take: 1, // Only first variant needed for card
+    select: {
+      name: true,
+      slug: true,
+      stock: true,
+      images: {
+        orderBy: { createdAt: "asc" },
+        take: 1,
+        select: { url: true },
+      },
+      variantPrices: {
+        select: {
+          price: true,
+          mrp: true,
+          locationGroupId: true,
+        },
+      },
+    },
+  },
+  reviews: {
+    // Only fetch the rating number — super cheap
+    select: {
+      rating: true,
+    },
+  },
+};
+
 // Static base include for Variant (no functions)
 const variantBaseInclude: Prisma.VariantInclude = {
   size: true,
@@ -111,8 +141,8 @@ const variantBaseInclude: Prisma.VariantInclude = {
 export async function productsList(
   query: ProductQuery,
   storeId: string
-): Promise<{ products: any[]; totalCount: number }> { // 'any[]' to handle partial selects
-  // Parse numbers safely (fixes String -> Int error)
+): Promise<{ products: any[]; totalCount: number }> {
+
   const limit = typeof query.limit === 'string' ? parseInt(query.limit, 10) : (query.limit ?? 12);
   const page = typeof query.page === 'string' ? parseInt(query.page, 10) : (query.page ?? 1);
   const parsedLimit = isNaN(limit) ? 12 : Math.max(1, limit);
@@ -187,105 +217,105 @@ export async function productsList(
     }
   }
 
-  // Location resolution for pincode
   let resolvedLocationGroupId = locationGroupId;
   if (pincode && !locationGroupId) {
-    const loc = await db.location.findUnique({ 
-      where: { pincode: pincode.toString(), storeId }, 
-      select: { locationGroupId: true } 
+    const loc = await db.location.findUnique({
+      where: { pincode: pincode.toString(), storeId },
+      select: { locationGroupId: true },
     });
     if (!loc?.locationGroupId) throw new Error("Invalid pincode");
     resolvedLocationGroupId = loc.locationGroupId;
   }
 
-  // Validation for subCategory
-  if (subCategoryId && categoryId) {
-    const subCat = await db.subCategory.findUnique({ where: { id: subCategoryId, storeId } });
-    if (!subCat || subCat.categoryId !== categoryId) throw new Error("Invalid subcategory");
-  }
-
-  // Build conditional include for variantPrices where
-  const variantPricesWhere = resolvedLocationGroupId ? { locationGroupId: resolvedLocationGroupId } : {};
-
-  // Handle selectFields for optimization (e.g., generateStaticParams)
-  let useSelect = false;
-  let select: Prisma.ProductSelect | undefined;
+  // Handle generateStaticParams case (unchanged)
   if (selectFields?.includes('variants.slug')) {
-    useSelect = true;
-    select = {
-      id: true,
-      variants: {
-        select: {
-          slug: true,
+    const products = await db.product.findMany({
+      where,
+      select: {
+        id: true,
+        variants: {
+          select: { slug: true },
         },
       },
-    };
+    });
+    const slugs = products.flatMap(p => p.variants.map(v => ({ slug: v.slug })));
+    return { products: slugs as any[], totalCount: slugs.length };
   }
 
-  // Custom include with conditional where (only if not using select)
-  const includeWithConditional: Prisma.ProductInclude = !useSelect ? {
-    ...productBaseInclude,
-    variants: {
-      ...productBaseInclude.variants,
-      include: {
-        ...variantBaseInclude,
-        variantPrices: {
-          where: variantPricesWhere,
-          ...variantBaseInclude.variantPrices,
-        },
-      },
-    },
-  } : undefined;
-
-  // Fetch products
   const hasPostFilter = !!rating || !!discount;
   const take = hasPostFilter ? undefined : parsedLimit;
   const skip = hasPostFilter ? 0 : (parsedPage - 1) * parsedLimit;
 
+  // Fetch with lightweight include + minimal reviews
   const products = await db.product.findMany({
-    ...(useSelect ? { select } : { include: includeWithConditional }),
     where,
     orderBy: { createdAt: Prisma.SortOrder.desc },
     skip,
     take,
+    include: productListInclude,
   });
 
-  let processedProducts = products;
-  if (useSelect) {
-    // For selectFields, flatten to slug objects (for generateStaticParams)
-    processedProducts = products.flatMap((p) =>
-      (p.variants as any[]).map((v) => ({ slug: v.slug }))
-    ) as any[];
-  } else {
-    // Calculate ratings (full fetch)
-    processedProducts = products.map((product: any) => {
-      const ratings = (product.reviews || []).map((r: any) => r.rating);
-      const numRatings = ratings.length;
-      const avgRating = numRatings > 0 ? ratings.reduce((a: number, b: number) => a + b, 0) / numRatings : 0;
-      const { reviews, ...p } = product;
-      return { ...p, averageRating: Number(avgRating.toFixed(2)), numberOfRatings: numRatings };
-    });
-  }
+  // Process products to match your ProductCard expectations
+  const processedProducts = products.map((product: any) => {
+    const firstVariant = product.variants[0];
 
+    // Compute average rating from reviews (only rating field fetched)
+    const ratings = product.reviews.map((r: { rating: number }) => r.rating);
+    const numberOfRatings = ratings.length;
+    const averageRating = numberOfRatings > 0
+      ? Number((ratings.reduce((a, b) => a + b, 0) / numberOfRatings).toFixed(2))
+      : 0;
+
+    // Handle variant price fallback (same logic as your card)
+    let selectedPrice = firstVariant?.variantPrices.find(
+      (vp: any) => vp.locationGroupId === resolvedLocationGroupId && vp.price > 0
+    );
+
+    if (!selectedPrice && firstVariant?.variantPrices) {
+      selectedPrice = firstVariant.variantPrices.find((vp: any) => vp.price > 0);
+    }
+
+    const cardVariant = firstVariant
+      ? {
+          ...firstVariant,
+          images: firstVariant.images || [],
+          variantPrices: firstVariant.variantPrices || [],
+        }
+      : null;
+
+    return {
+      ...product,
+      variants: cardVariant ? [cardVariant] : [],
+      averageRating,
+      numberOfRatings,
+      reviews: undefined, // Clean up — not needed anymore
+    };
+  });
+
+  // Apply post-filters
   let filtered = processedProducts;
-  if (!useSelect && hasPostFilter) {
-    if (rating) filtered = filtered.filter((p: any) => p.averageRating >= parseFloat(rating));
+
+  if (hasPostFilter) {
+    if (rating) {
+      filtered = filtered.filter(p => p.averageRating >= parseFloat(rating));
+    }
     if (discount) {
-      filtered = filtered.filter((p: any) =>
-        p.variants.some((v: any) =>
-          v.variantPrices.some((vp: any) => 
-            (!resolvedLocationGroupId || vp.locationGroupId === resolvedLocationGroupId) &&
-            vp.mrp > vp.price &&
-            ((vp.mrp - vp.price) / vp.mrp) * 100 >= parseFloat(discount)
-          )
-        )
-      );
+      filtered = filtered.filter((p: any) => {
+        const prices = p.variants[0]?.variantPrices || [];
+        return prices.some((vp: any) => {
+          if (vp.mrp <= vp.price) return false;
+          const discountPercent = Math.round(((vp.mrp - vp.price) / vp.mrp) * 100);
+          return discountPercent >= parseFloat(discount);
+        });
+      });
     }
   }
 
   const totalCount = hasPostFilter ? filtered.length : await db.product.count({ where });
 
-  const finalProducts = hasPostFilter ? filtered.slice((parsedPage - 1) * parsedLimit, parsedPage * parsedLimit) : filtered;
+  const finalProducts = hasPostFilter
+    ? filtered.slice((parsedPage - 1) * parsedLimit, parsedPage * parsedLimit)
+    : processedProducts;
 
   return { products: finalProducts, totalCount };
 }
