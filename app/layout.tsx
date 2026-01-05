@@ -4,6 +4,7 @@ import { Toaster } from "sonner";
 import { ModalProvider } from "@/providers/admin/modal-provider";
 import { ThemeProvider } from "@/providers/admin/theme-provider";
 import { SessionProvider } from "next-auth/react";
+import { Analytics } from "@vercel/analytics/next";
 import "./globals.css";
 
 const roboto = Roboto({
@@ -30,6 +31,7 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <link rel="icon" href="/assets/favicon.ico" sizes="any" />
       <body className={roboto.className}>
+        <Analytics />
         <SessionProvider refetchInterval={5 * 60} refetchOnWindowFocus={true}>
           <ThemeProvider
             attribute="class"
